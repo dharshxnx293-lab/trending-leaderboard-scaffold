@@ -1,43 +1,39 @@
-// leaderboard.js — a trending leaderboard backed by a Redis sorted set + a hash per post.
-//
-// Storage shape:
-//   trending:posts        (sorted set)  member = postId, score = engagement  -> the ranking
-//   post:<id>:meta        (hash)        title, author                        -> the metadata
-//
-// You implement the two exported functions below. Everything else is wired for you.
-
+// leaderboard.js — Redis sorted-set ranking + per-post metadata hashes.
 import Redis from "ioredis";
 import "dotenv/config";
 
 const redis = new Redis(process.env.REDIS_URL);
 
-/**
- * Record one unit of engagement for a post.
- * Must be a SINGLE atomic Redis command (no read-modify-write).
- *
- * @param {string} postId  e.g. "post:104"
- * @returns {Promise<string>} the post's new score
- */
+const LEADERBOARD_KEY = "trending:posts";
+
+/** Record one unit of engagement with one atomic Redis command. */
 export async function upvote(postId) {
-  // TODO: ZINCRBY trending:posts by 1 for `postId` and return the new score.
-  //       ioredis: redis.zincrby(key, increment, member)
-  throw new Error("upvote() not implemented");
+  return redis.zincrby(LEADERBOARD_KEY, 1, postId);
 }
 
-/**
- * Fetch the top N posts, ranked high -> low, each WITH its metadata (title, author).
- * Must use ONE ioredis pipeline for all the HGETALL calls (not one round trip per post).
- *
- * @param {number} n  how many posts to return
- * @returns {Promise<Array<{ id: string, score: number, title?: string, author?: string }>>}
- */
+/** Return the top N posts, including their metadata, using one pipeline. */
 export async function getTop(n) {
-  // TODO:
-  // 1. redis.zrevrange("trending:posts", 0, n - 1, "WITHSCORES")  -> flat [id, score, id, score, ...]
-  // 2. Build rows [{ id, score }] AND queue one pipeline.hgetall(id + ":meta") per id.
-  // 3. await pipeline.exec()  -> results[k] is [error, value] for the k-th queued command.
-  // 4. Merge: return rows.map((row, k) => ({ ...row, ...results[k][1] })).
-  throw new Error("getTop() not implemented");
+  if (!Number.isInteger(n) || n < 0) {
+    throw new TypeError("n must be a non-negative integer");
+  }
+  if (n === 0) return [];
+
+  const ranked = await redis.zrevrange(LEADERBOARD_KEY, 0, n - 1, "WITHSCORES");
+  const rows = [];
+  const pipeline = redis.pipeline();
+
+  for (let i = 0; i < ranked.length; i += 2) {
+    const id = ranked[i];
+    rows.push({ id, score: Number(ranked[i + 1]) });
+    pipeline.hgetall(`${id}:meta`);
+  }
+
+  const results = await pipeline.exec();
+  return rows.map((row, i) => {
+    const [error, metadata] = results[i];
+    if (error) throw error;
+    return { ...row, ...metadata };
+  });
 }
 
 export { redis };
